@@ -24,7 +24,7 @@ The `load_data` function fetches historical stock data from Yahoo Finance using 
 
 ## Forecasting with Prophet
 
-Prophet, a forecasting tool developed by Facebook, is used to predict future stock prices.
+Prophet, a forecasting tool developed by Meta, is used to predict future stock prices.
 
 - **Model Training**: The historical data is split into training and testing sets. The training set is used to train the Prophet model, which learns the patterns in the data.
 - **Forecasting**: The model makes future price predictions for the specified period (up to 5 years). These predictions are displayed in a table and plotted to visualize the forecasted stock prices.
