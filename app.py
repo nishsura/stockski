@@ -10,6 +10,10 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import GridSearchCV
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Import SentimentIntensityAnalyzer
+from sqlalchemy.orm import Session
+from models import Stock, SessionLocal
+from db_operations import add_stock, get_all_stocks
+
 
 START = "2015-01-01"
 TODAY = date.today().strftime("%Y-%m-%d")
@@ -103,12 +107,49 @@ def load_data(ticker, start, end):
     data.reset_index(inplace=True)
     return data
 
+# Store data in the database
+def store_data_in_db(data, ticker):
+    db = SessionLocal()
+    for index, row in data.iterrows():
+        stock_data = {
+            'date': row['Date'],
+            'open': row['Open'],
+            'high': row['High'],
+            'low': row['Low'],
+            'close': row['Close'],
+            'volume': row['Volume'],
+            'ticker': ticker
+        }
+        add_stock(db, stock_data)
+
 data_load_state = st.text("Load Data")
 data = load_data(selected_stock, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
 data_load_state.text("Data Loaded")
 
+# Store data in the database
+store_data_in_db(data, selected_stock)
+
+
 st.subheader('Raw Data')
 st.write(data.tail())
+
+# Retrieve and display data from the database
+def display_db_data():
+    db = SessionLocal()
+    stocks = get_all_stocks(db)
+    df = pd.DataFrame([{
+        'Date': stock.date,
+        'Open': stock.open,
+        'High': stock.high,
+        'Low': stock.low,
+        'Close': stock.close,
+        'Volume': stock.volume,
+        'Ticker': stock.ticker
+    } for stock in stocks])
+    st.subheader('Recent Stock Data from SQL Database')
+    st.write(df.tail())
+
+display_db_data()
 
 def plot_raw_data():
     fig = go.Figure()
