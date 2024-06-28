@@ -1,6 +1,6 @@
-# Stock Predictor
+# stockski
 
-The "Stock Predictor" is a comprehensive project developed to predict stock prices using historical data and advanced forecasting techniques. This project leverages machine learning algorithms and statistical models to provide insightful predictions and visualizations for various stocks. The tool is designed to be user-friendly, incorporating an interactive web interface built using Streamlit, a popular Python library for creating web applications.
+The stockski is a comprehensive stock predictor project developed to predict stock prices using historical data and advanced forecasting techniques. This project leverages machine learning algorithms and statistical models to provide insightful predictions and visualizations for various stocks. The tool is designed to be user-friendly, incorporating an interactive web interface built using Streamlit, a popular Python library for creating web applications.
 
 ## User Interface
 
@@ -49,13 +49,13 @@ The application includes features for downloading the raw and forecast data in C
 
 ## Conclusion
 
-The "Stock Predictor" project combines several advanced techniques to provide a robust tool for stock price prediction. By leveraging Prophet for statistical forecasting and RandomForestRegressor for machine learning predictions, the tool offers a comprehensive analysis of stock price movements. The inclusion of various visualizations, such as time series plots, moving averages, candlestick charts, and Bollinger Bands, enhances the user's ability to understand and interpret the stock data. Overall, this project demonstrates the power of combining different data analysis and machine learning techniques to create a valuable tool for stock market prediction and analysis.
+The stockski project combines several advanced techniques to provide a robust tool for stock price prediction. By leveraging Prophet for statistical forecasting and RandomForestRegressor for machine learning predictions, the tool offers a comprehensive analysis of stock price movements. The inclusion of various visualizations, such as time series plots, moving averages, candlestick charts, and Bollinger Bands, enhances the user's ability to understand and interpret the stock data. Overall, this project demonstrates the power of combining different data analysis and machine learning techniques to create a valuable tool for stock market prediction and analysis.
 
 ---
 
 ## Getting Started
 
-To run the "Stock Predictor" application locally, follow these steps:
+To run the stockski application locally, follow these steps:
 
 1. **Clone the Repository**:
     ```bash
