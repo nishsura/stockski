@@ -137,11 +137,28 @@ def plot_moving_averages(data):
 plot_moving_averages(data)
 
 # Prophet Forecasting
-df_train = data[['Date', 'Close']]
+df_train = data[['Date', 'Close']].dropna()
 df_train = df_train.rename(columns={"Date": "ds", "Close": "y"})
 
-m = Prophet()
-m.fit(df_train)
+if df_train.shape[0] < 2:
+    st.error("Not enough data to train Prophet model. Try a different stock or date range.")
+else:
+    m = Prophet()
+    m.fit(df_train)
+    future = m.make_future_dataframe(periods=period)
+    forecast = m.predict(future)
+
+    st.subheader('Forecast Data')
+    st.write(forecast.tail())
+
+    st.write(f'Forecast Plot for {n_years} Years')
+    fig1 = plot_plotly(m, forecast)
+    st.plotly_chart(fig1)
+
+    st.write("Forecast Components")
+    fig2 = m.plot_components(forecast)
+    st.write(fig2)
+
 future = m.make_future_dataframe(periods=period)
 forecast = m.predict(future)
 
