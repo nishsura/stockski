@@ -108,22 +108,41 @@ try:
     import sys
     from prophet import Prophet
     
-    # 1. Try to find CmdStan in common locations
-    possible_paths = [
-        os.path.expanduser('~/.cmdstan/cmdstan-2.38.0'),
-        os.path.expanduser('~/.cmdstan/cmdstan-2.33.1'),
-        os.path.join(os.getcwd(), '.cmdstan'),
-    ]
-    
-    # Add any path found in environment variables
-    if 'CMDSTAN' in os.environ:
-        possible_paths.insert(0, os.environ['CMDSTAN'])
-    
-    found_path = None
-    for path in possible_paths:
-        if os.path.exists(path):
-            found_path = path
-            break
+    def ensure_cmdstan():
+        """Ensures CmdStan is installed, especially for Cloud environments"""
+        # 1. Try to find existing installation
+        possible_paths = [
+            os.path.expanduser('~/.cmdstan/cmdstan-2.38.0'),
+            os.path.expanduser('~/.cmdstan/cmdstan-2.33.1'),
+            os.path.join(os.getcwd(), '.cmdstan'),
+            '/tmp/cmdstan/cmdstan-2.33.1', # Common for Streamlit Cloud
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        # 2. If not found and we are likely in a cloud environment, try to install it
+        # We use /tmp because it's usually writable in cloud environments
+        if os.environ.get('STREAMLIT_RUNTIME_ENV') or not any(os.path.exists(p) for p in possible_paths[:2]):
+            try:
+                target_dir = '/tmp/cmdstan'
+                if not os.path.exists(target_dir):
+                    os.makedirs(target_dir, exist_ok=True)
+                
+                # Check if already installed in tmp
+                tmp_install = os.path.join(target_dir, 'cmdstan-2.33.1')
+                if os.path.exists(tmp_install):
+                    return tmp_install
+                
+                # Install (this may take a minute)
+                cmdstanpy.install_cmdstan(dir=target_dir, version='2.33.1', install_dir=target_dir)
+                return tmp_install
+            except Exception:
+                pass
+        return None
+
+    found_path = ensure_cmdstan()
             
     if found_path:
         cmdstanpy.set_cmdstan_path(found_path)
@@ -131,31 +150,27 @@ try:
         # Monkeypatch to prevent Prophet from overwriting with an invalid path
         original_set_path = cmdstanpy.set_cmdstan_path
         def mocked_set_path(path):
-            # Only allow setting if the path actually exists and is valid
             if not os.path.exists(path):
                 return
             original_set_path(path)
         cmdstanpy.set_cmdstan_path = mocked_set_path
     
     # 2. Fix the 'AttributeError: stan_backend' bug in Prophet 1.1+
-    # This happens when initialization fails but the logger tries to access the attribute
     original_init = Prophet.__init__
     def patched_init(self, *args, **kwargs):
+        class DummyBackend:
+            def get_type(self): return "None"
         if not hasattr(self, 'stan_backend'):
-            self.stan_backend = None
+            self.stan_backend = DummyBackend()
         try:
             original_init(self, *args, **kwargs)
-        except AttributeError as e:
-            if 'stan_backend' in str(e):
-                # If it still fails with this specific error, we've caught the bug
-                pass
-            else:
-                raise e
+        except Exception:
+            if not hasattr(self, 'stan_backend') or self.stan_backend is None:
+                self.stan_backend = DummyBackend()
     
     Prophet.__init__ = patched_init
 
-except Exception as e:
-    # Silent fail for the patch - we don't want to break the whole app
+except Exception:
     pass
 
 # Page Configuration
