@@ -105,66 +105,69 @@ except ImportError:
 try:
     import cmdstanpy
     import os
-    import sys
     from prophet import Prophet
     
     def ensure_cmdstan():
-        """Ensures CmdStan is installed, especially for Cloud environments"""
-        # 1. Try to find existing installation
+        """Aggressively ensures CmdStan is available for Prophet"""
+        # 1. Check if already configured correctly
+        try:
+            return cmdstanpy.cmdstan_path()
+        except Exception:
+            pass
+            
+        # 2. Check standard paths
+        home_cmdstan = os.path.expanduser('~/.cmdstan')
         possible_paths = [
-            os.path.expanduser('~/.cmdstan/cmdstan-2.38.0'),
-            os.path.expanduser('~/.cmdstan/cmdstan-2.33.1'),
+            os.path.join(home_cmdstan, 'cmdstan-2.38.0'),
+            os.path.join(home_cmdstan, 'cmdstan-2.33.1'),
             os.path.join(os.getcwd(), '.cmdstan'),
-            '/tmp/cmdstan/cmdstan-2.33.1', # Common for Streamlit Cloud
+            '/tmp/cmdstan/cmdstan-2.33.1',
         ]
         
         for path in possible_paths:
-            if os.path.exists(path):
+            if os.path.exists(path) and os.path.exists(os.path.join(path, 'bin', 'stanc')):
                 return path
         
-        # 2. If not found and we are likely in a cloud environment, try to install it
-        # We use /tmp because it's usually writable in cloud environments
-        if os.environ.get('STREAMLIT_RUNTIME_ENV') or not any(os.path.exists(p) for p in possible_paths[:2]):
+        # 3. Cloud Auto-Install (Streamlit Cloud specific)
+        if os.environ.get('STREAMLIT_RUNTIME_ENV') or not os.path.exists(home_cmdstan):
             try:
-                target_dir = '/tmp/cmdstan'
-                if not os.path.exists(target_dir):
-                    os.makedirs(target_dir, exist_ok=True)
+                # Use /tmp as it is most likely to be writable and have space
+                target = '/tmp/cmdstan'
+                if not os.path.exists(target):
+                    os.makedirs(target, exist_ok=True)
                 
-                # Check if already installed in tmp
-                tmp_install = os.path.join(target_dir, 'cmdstan-2.33.1')
-                if os.path.exists(tmp_install):
-                    return tmp_install
+                install_path = os.path.join(target, 'cmdstan-2.33.1')
+                if not os.path.exists(install_path):
+                    # Attempt a fast install
+                    cmdstanpy.install_cmdstan(dir=target, version='2.33.1', install_dir=target)
                 
-                # Install (this may take a minute)
-                cmdstanpy.install_cmdstan(dir=target_dir, version='2.33.1', install_dir=target_dir)
-                return tmp_install
+                if os.path.exists(install_path):
+                    return install_path
             except Exception:
                 pass
         return None
 
+    # Apply found path
     found_path = ensure_cmdstan()
-            
     if found_path:
         cmdstanpy.set_cmdstan_path(found_path)
-        
-        # Monkeypatch to prevent Prophet from overwriting with an invalid path
-        original_set_path = cmdstanpy.set_cmdstan_path
-        def mocked_set_path(path):
-            if not os.path.exists(path):
-                return
-            original_set_path(path)
-        cmdstanpy.set_cmdstan_path = mocked_set_path
     
-    # 2. Fix the 'AttributeError: stan_backend' bug in Prophet 1.1+
+    # 2. Advanced Monkeypatch to fix Prophet 1.1+ Backend Bugs
     original_init = Prophet.__init__
     def patched_init(self, *args, **kwargs):
         class DummyBackend:
             def get_type(self): return "None"
+            def fit(self, *args, **kwargs): 
+                raise RuntimeError("Prophet Engine (CmdStan) not found. Please wait 1 minute for auto-install to complete and refresh the page.")
+        
+        # Ensure stan_backend exists before calling original init
         if not hasattr(self, 'stan_backend'):
             self.stan_backend = DummyBackend()
+            
         try:
             original_init(self, *args, **kwargs)
         except Exception:
+            # Fallback to dummy if init fails to load a real backend
             if not hasattr(self, 'stan_backend') or self.stan_backend is None:
                 self.stan_backend = DummyBackend()
     
@@ -422,8 +425,61 @@ def load_stock_data(ticker, start_date, end_date):
     except Exception as e:
         return None, f"Critical data source error: {str(e)}"
 
+def create_standard_forecast(data, periods):
+    """Create a robust Linear Regression forecast as a stable fallback/primary model"""
+    try:
+        df = data[['Date', 'Close']].copy()
+        df = df.dropna()
+        
+        if len(df) < 30:
+            return None, None, "Not enough data for forecasting"
+            
+        # Prepare training data
+        # Use ordinal dates for regression
+        df['Date_Ordinal'] = df['Date'].map(datetime.toordinal)
+        X = df[['Date_Ordinal']].values
+        y = df['Close'].values
+        
+        # Train model
+        model = LinearRegression()
+        model.fit(X, y)
+        
+        # Create future dates
+        last_date = df['Date'].max()
+        future_dates = [last_date + timedelta(days=i) for i in range(1, periods + 1)]
+        all_dates = list(df['Date']) + future_dates
+        
+        # Predict
+        future_ordinals = np.array([d.toordinal() for d in all_dates]).reshape(-1, 1)
+        predictions = model.predict(future_ordinals)
+        
+        # Ensure non-negative
+        predictions = np.maximum(predictions, 0.01)
+        
+        # Create forecast dataframe
+        forecast = pd.DataFrame({
+            'ds': all_dates,
+            'yhat': predictions,
+        })
+        
+        # Simple confidence intervals (using standard error)
+        residuals = y - model.predict(X)
+        std_err = np.std(residuals)
+        forecast['yhat_lower'] = forecast['yhat'] - (1.96 * std_err)
+        forecast['yhat_upper'] = forecast['yhat'] + (1.96 * std_err)
+        forecast['yhat_lower'] = np.maximum(forecast['yhat_lower'], 0.01)
+        
+        return forecast, model, None
+    except Exception as e:
+        return None, None, f"Error in standard model: {str(e)}"
+
 def create_prophet_forecast(data, periods):
-    """Create Prophet forecast with logistic growth to ensure non-negative prices"""
+    """Create Prophet forecast with safety checks"""
+    # Check if Prophet is actually working (DummyBackend check)
+    m = Prophet()
+    if hasattr(m, 'stan_backend') and m.stan_backend.__class__.__name__ == 'DummyBackend':
+        return None, None, "Prophet Engine not available on this server."
+        
     try:
         df_prophet = data[['Date', 'Close']].copy()
         df_prophet.columns = ['ds', 'y']
@@ -432,9 +488,6 @@ def create_prophet_forecast(data, periods):
         if len(df_prophet) < 30:
             return None, None, "Not enough data for Prophet model"
         
-        # Logistic growth needs a cap and floor
-        # We set the floor to 0 to prevent negative predictions
-        # We set the cap to 2x the maximum historical price (or at least a very high value)
         max_price = df_prophet['y'].max()
         df_prophet['cap'] = max_price * 10 
         df_prophet['floor'] = 0
@@ -1002,46 +1055,90 @@ def main():
         with tab2:
             st.markdown("## 🤖 AI Predictions")
             
+            # --- PRIMARY STABLE FORECAST ---
+            st.markdown("### 📊 Linear Growth Forecast")
+            st.info("💡 Using a high-reliability linear regression model for v0 deployment.")
+            
+            with st.spinner("Calculating stable forecast..."):
+                forecast, model, error = create_standard_forecast(data, st.session_state.prediction_days)
+                
+                if error:
+                    st.error(error)
+                elif forecast is not None:
+                    # Custom Plotly Chart for Standard Forecast
+                    fig = go.Figure()
+                    
+                    # Confidence Interval
+                    fig.add_trace(go.Scatter(
+                        x=list(forecast['ds']) + list(forecast['ds'])[::-1],
+                        y=list(forecast['yhat_upper']) + list(forecast['yhat_lower'])[::-1],
+                        fill='toself',
+                        fillcolor='rgba(0,176,246,0.2)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        hoverinfo="skip",
+                        showlegend=False,
+                        name='Confidence Interval'
+                    ))
+                    
+                    # Historical Data
+                    fig.add_trace(go.Scatter(
+                        x=data['Date'],
+                        y=data['Close'],
+                        mode='lines',
+                        name='Historical',
+                        line=dict(color='black', width=1)
+                    ))
+                    
+                    # Prediction
+                    prediction_only = forecast[forecast['ds'] > data['Date'].max()]
+                    fig.add_trace(go.Scatter(
+                        x=prediction_only['ds'],
+                        y=prediction_only['yhat'],
+                        mode='lines',
+                        name='Forecast',
+                        line=dict(color='#00B0F6', width=3)
+                    ))
+                    
+                    fig.update_layout(
+                        title=f'{ticker} Price Forecast (Standard Model)',
+                        xaxis_title='Date',
+                        yaxis_title='Price ($)',
+                        hovermode='x unified',
+                        height=500
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Forecast metrics
+                    current_price = data['Close'].iloc[-1]
+                    next_day_pred = forecast['yhat'].iloc[len(data)]
+                    end_pred = forecast['yhat'].iloc[-1]
+                    growth_pct = ((end_pred - current_price) / current_price) * 100
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Next Day Prediction", f"${next_day_pred:.2f}")
+                    with col2:
+                        st.metric(f"{prediction_years} Year Prediction", f"${end_pred:.2f}")
+                    with col3:
+                        st.metric("Predicted Growth", f"{growth_pct:+.2f}%")
+            
+            # --- OPTIONAL PROPHET FORECAST ---
             if st.session_state.use_prophet:
-                st.markdown("### 📊 Prophet Forecast")
+                st.divider()
+                st.markdown("### 🧪 Experimental: Prophet Forecast")
                 with st.spinner("Training Prophet model..."):
-                    # Use selected date range for Prophet training
                     prophet_data = data[(data['Date'] >= pd.to_datetime(start_date)) & 
                                        (data['Date'] <= pd.to_datetime(end_date))]
                     forecast, model, error = create_prophet_forecast(prophet_data, st.session_state.prediction_days)
                     
                     if error:
-                        st.error(error)
+                        st.warning(f"Prophet not available: {error}")
+                        st.info("Use the Standard Forecast above for reliable results.")
                     elif forecast is not None and model is not None:
                         # Prophet plot
                         fig = plot_plotly(model, forecast)
                         st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Forecast summary - use current price from full dataset
-                        last_date = prophet_data['Date'].iloc[-1]
-                        current_price = data['Close'].iloc[-1]  # Use most recent price
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            if len(forecast) > st.session_state.prediction_days:
-                                # The first prediction day is at index len(prophet_data)
-                                next_day_pred = forecast['yhat'].iloc[len(prophet_data)]
-                                st.metric("Next Day Prediction", f"${next_day_pred:.2f}")
-                            else:
-                                st.metric("Next Day Prediction", "N/A")
-                        
-                        with col2:
-                            end_pred = forecast['yhat'].iloc[-1]
-                            st.metric(f"{prediction_years} Year Prediction", f"${end_pred:.2f}")
-                        
-                        with col3:
-                            growth_pct = ((end_pred - current_price) / current_price) * 100
-                            st.metric("Predicted Growth", f"{growth_pct:+.2f}%")
-                        
-                        # Store forecast in session state for export
-                        st.session_state.prophet_forecast = forecast
-                    else:
-                        st.error("Failed to create Prophet forecast")
+                        st.success("Prophet model engine loaded successfully!")
             
             if st.session_state.use_ml_models:
                 st.markdown("### 🤖 Machine Learning Models")
