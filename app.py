@@ -101,27 +101,61 @@ except ImportError:
     ALPHA_VANTAGE_AVAILABLE = False
     st.warning("⚠️ Alpha Vantage package not installed. Install with: pip install alpha_vantage")
 
-# Fix for Prophet Stan backend issue
+# Fix for Prophet Stan backend issue (Local & Cloud compatible)
 try:
     import cmdstanpy
     import os
+    import sys
+    from prophet import Prophet
     
-    # Define correct path for CmdStan
-    # This is necessary because Prophet 1.1+ can fail to find the backend on some systems
-    cmdstan_path = os.path.expanduser('~/.cmdstan/cmdstan-2.38.0')
+    # 1. Try to find CmdStan in common locations
+    possible_paths = [
+        os.path.expanduser('~/.cmdstan/cmdstan-2.38.0'),
+        os.path.expanduser('~/.cmdstan/cmdstan-2.33.1'),
+        os.path.join(os.getcwd(), '.cmdstan'),
+    ]
     
-    if os.path.exists(cmdstan_path):
-        # Set the path in cmdstanpy
-        cmdstanpy.set_cmdstan_path(cmdstan_path)
+    # Add any path found in environment variables
+    if 'CMDSTAN' in os.environ:
+        possible_paths.insert(0, os.environ['CMDSTAN'])
+    
+    found_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            found_path = path
+            break
+            
+    if found_path:
+        cmdstanpy.set_cmdstan_path(found_path)
         
         # Monkeypatch to prevent Prophet from overwriting with an invalid path
         original_set_path = cmdstanpy.set_cmdstan_path
         def mocked_set_path(path):
-            if path != cmdstan_path:
+            # Only allow setting if the path actually exists and is valid
+            if not os.path.exists(path):
                 return
             original_set_path(path)
         cmdstanpy.set_cmdstan_path = mocked_set_path
+    
+    # 2. Fix the 'AttributeError: stan_backend' bug in Prophet 1.1+
+    # This happens when initialization fails but the logger tries to access the attribute
+    original_init = Prophet.__init__
+    def patched_init(self, *args, **kwargs):
+        if not hasattr(self, 'stan_backend'):
+            self.stan_backend = None
+        try:
+            original_init(self, *args, **kwargs)
+        except AttributeError as e:
+            if 'stan_backend' in str(e):
+                # If it still fails with this specific error, we've caught the bug
+                pass
+            else:
+                raise e
+    
+    Prophet.__init__ = patched_init
+
 except Exception as e:
+    # Silent fail for the patch - we don't want to break the whole app
     pass
 
 # Page Configuration
