@@ -1,10 +1,10 @@
 """
-Configuration file for StockSki - Advanced Stock Predictor
+Configuration file for StockLens - Advanced Stock Predictor
 """
 
 # App Configuration
 APP_CONFIG = {
-    'title': 'StockSki - Advanced Stock Predictor',
+    'title': 'StockLens - Advanced Stock Predictor',
     'icon': '📈',
     'layout': 'wide',
     'initial_sidebar_state': 'expanded'

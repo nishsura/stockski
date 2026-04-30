@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for StockSki - Advanced Stock Predictor
+Test script for StockLens - Advanced Stock Predictor
 This script tests the main functionality without running the Streamlit app
 """
 
@@ -205,7 +205,7 @@ def test_prophet_forecast():
 
 def main():
     """Run all tests"""
-    print("🚀 Starting StockSki App Tests...")
+    print("🚀 Starting StockLens App Tests...")
     print("=" * 50)
     
     tests = [

@@ -101,9 +101,32 @@ except ImportError:
     ALPHA_VANTAGE_AVAILABLE = False
     st.warning("⚠️ Alpha Vantage package not installed. Install with: pip install alpha_vantage")
 
+# Fix for Prophet Stan backend issue
+try:
+    import cmdstanpy
+    import os
+    
+    # Define correct path for CmdStan
+    # This is necessary because Prophet 1.1+ can fail to find the backend on some systems
+    cmdstan_path = os.path.expanduser('~/.cmdstan/cmdstan-2.38.0')
+    
+    if os.path.exists(cmdstan_path):
+        # Set the path in cmdstanpy
+        cmdstanpy.set_cmdstan_path(cmdstan_path)
+        
+        # Monkeypatch to prevent Prophet from overwriting with an invalid path
+        original_set_path = cmdstanpy.set_cmdstan_path
+        def mocked_set_path(path):
+            if path != cmdstan_path:
+                return
+            original_set_path(path)
+        cmdstanpy.set_cmdstan_path = mocked_set_path
+except Exception as e:
+    pass
+
 # Page Configuration
 st.set_page_config(
-    page_title="StockSki - Advanced Stock Predictor",
+    page_title="StockLens - Advanced Stock Predictor",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -201,50 +224,157 @@ def normalize_ticker(ticker):
         return "BRK.A"
     return ticker.replace("-", ".")
 
-def load_stock_data(ticker, start_date, end_date):
-    """Load stock data using Alpha Vantage only"""
+def fetch_yahoo_data_direct(ticker, start_date, end_date):
+    """Directly fetch data from Yahoo Finance API as a fallback for yfinance"""
     try:
-        # Use provided API key, built-in key, or demo key
+        import time
+        # Add buffer for indicators
+        start_dt = pd.to_datetime(start_date) - timedelta(days=365)
+        start_ts = int(start_dt.timestamp())
+        end_ts = int(pd.to_datetime(end_date).timestamp())
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start_ts}&period2={end_ts}&interval=1d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            json_data = response.json()
+            if 'chart' in json_data and 'result' in json_data['chart'] and json_data['chart']['result']:
+                result = json_data['chart']['result'][0]
+                if 'timestamp' in result and 'indicators' in result:
+                    timestamps = result['timestamp']
+                    quote = result['indicators']['quote'][0]
+                    
+                    df = pd.DataFrame({
+                        'Date': pd.to_datetime(timestamps, unit='s'),
+                        'Open': quote.get('open'),
+                        'High': quote.get('high'),
+                        'Low': quote.get('low'),
+                        'Close': quote.get('close'),
+                        'Volume': quote.get('volume')
+                    })
+                    # Clean up data (drop NaNs that might occur at the end)
+                    df = df.dropna(subset=['Close'])
+                    return df
+    except Exception as e:
+        st.error(f"Debug: Direct Yahoo fetch failed: {str(e)}")
+    return None
+
+def fetch_yahoo_data_direct(ticker, start_date, end_date):
+    """Directly fetch data from Yahoo Finance API as a fallback for yfinance"""
+    try:
+        # Add buffer for indicators
+        start_dt = pd.to_datetime(start_date) - timedelta(days=365)
+        start_ts = int(start_dt.timestamp())
+        end_ts = int(pd.to_datetime(end_date).timestamp())
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start_ts}&period2={end_ts}&interval=1d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            json_data = response.json()
+            if 'chart' in json_data and 'result' in json_data['chart'] and json_data['chart']['result']:
+                result = json_data['chart']['result'][0]
+                if 'timestamp' in result and 'indicators' in result:
+                    timestamps = result['timestamp']
+                    quote = result['indicators']['quote'][0]
+                    
+                    df = pd.DataFrame({
+                        'Date': pd.to_datetime(timestamps, unit='s'),
+                        'Open': quote.get('open'),
+                        'High': quote.get('high'),
+                        'Low': quote.get('low'),
+                        'Close': quote.get('close'),
+                        'Volume': quote.get('volume')
+                    })
+                    # Clean up data (drop NaNs that might occur at the end)
+                    df = df.dropna(subset=['Close'])
+                    return df
+    except Exception:
+        pass
+    return None
+
+def load_stock_data(ticker, start_date, end_date):
+    """Load stock data using yfinance/Yahoo as primary and Alpha Vantage as fallback"""
+    yf_ticker = normalize_ticker(ticker)
+    data = None
+    
+    # 1. Try yfinance first
+    try:
+        buffer_start = pd.to_datetime(start_date) - timedelta(days=365)
+        data = yf.download(yf_ticker, start=buffer_start, end=end_date, progress=False)
+        
+        if data is not None and not data.empty:
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            data.reset_index(inplace=True)
+    except Exception:
+        pass
+
+    # 2. Fallback to direct Yahoo API if yfinance fails
+    if data is None or data.empty:
+        data = fetch_yahoo_data_direct(yf_ticker, start_date, end_date)
+
+    # Process Yahoo/yfinance data if successful
+    if data is not None and not data.empty:
+        # Standardize column names
+        rename_map = {'Date': 'Date', 'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'}
+        data.rename(columns=rename_map, inplace=True, errors='ignore')
+        
+        # Ensure we have the required columns
+        required = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+        if all(col in data.columns for col in required):
+            data = data[required]
+            data['Date'] = pd.to_datetime(data['Date'])
+            
+            # Filter to the requested range (after buffer)
+            filtered_data = data[data['Date'] >= pd.to_datetime(start_date)]
+            
+            if not filtered_data.empty:
+                return filtered_data.sort_values('Date'), None
+            else:
+                return data.sort_values('Date'), None
+
+    # 3. Last resort: Alpha Vantage
+    st.info("🔄 Yahoo Finance sources failed. Attempting Alpha Vantage fallback...")
+    try:
         api_key = getattr(st.session_state, 'alpha_vantage_key', None) or '8WBPEO4W0U2C6X2Z' or 'demo'
         ts = TimeSeries(key=api_key, output_format='pandas')
-        data, meta_data = ts.get_daily(symbol=ticker, outputsize='full')
+        
+        # If using the built-in free key, default to 'compact' to avoid premium errors
+        is_free_key = (api_key == '8WBPEO4W0U2C6X2Z' or api_key == 'demo')
+        output_size = 'compact' if is_free_key else 'full'
+        
+        try:
+            data, meta_data = ts.get_daily(symbol=ticker, outputsize=output_size)
+        except Exception as e:
+            if "premium" in str(e).lower() and output_size == 'full':
+                st.warning("⚠️ Alpha Vantage 'full' data is a premium feature. Retrying with 'compact'...")
+                data, meta_data = ts.get_daily(symbol=ticker, outputsize='compact')
+            else:
+                return None, f"Alpha Vantage error: {str(e)}"
+
         if data is not None and not data.empty:
-            # Rename columns to match Yahoo format
             data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             data.reset_index(inplace=True)
             data.rename(columns={'date': 'Date'}, inplace=True)
             data['Date'] = pd.to_datetime(data['Date'])
             
-            # Sort by date to ensure we have the most recent data first
-            data = data.sort_values('Date', ascending=False)
+            data = data.sort_values('Date')
+            filtered_data = data[(data['Date'] >= pd.to_datetime(start_date)) & 
+                               (data['Date'] <= pd.to_datetime(end_date))]
             
-            # Find the most recent available data up to the end_date
-            end_datetime = pd.to_datetime(end_date)
-            available_data = data[data['Date'] <= end_datetime]
+            if not filtered_data.empty:
+                return filtered_data, None
+            return data, None
             
-            if not available_data.empty:
-                # Get the most recent available date (could be end_date or earlier if it's a weekend/holiday)
-                most_recent_date = available_data['Date'].max()
-                
-                # Filter data from start_date to the most recent available date
-                filtered_data = data[(data['Date'] >= pd.to_datetime(start_date)) & 
-                                   (data['Date'] <= most_recent_date)]
-                
-                # Sort back to chronological order for analysis
-                filtered_data = filtered_data.sort_values('Date', ascending=True)
-                
-                if not filtered_data.empty:
-                    return filtered_data, None
-                else:
-                    return None, f"Alpha Vantage: No data available between {start_date} and {most_recent_date.strftime('%Y-%m-%d')}"
-            else:
-                return None, f"Alpha Vantage: No data available up to {end_date}"
-        return None, "Alpha Vantage: No data found for this ticker."
+        return None, "All data sources failed to return data for this ticker."
     except Exception as e:
-        return None, f"Alpha Vantage error: {str(e)}"
+        return None, f"Critical data source error: {str(e)}"
 
 def create_prophet_forecast(data, periods):
-    """Create Prophet forecast"""
+    """Create Prophet forecast with logistic growth to ensure non-negative prices"""
     try:
         df_prophet = data[['Date', 'Close']].copy()
         df_prophet.columns = ['ds', 'y']
@@ -253,7 +383,15 @@ def create_prophet_forecast(data, periods):
         if len(df_prophet) < 30:
             return None, None, "Not enough data for Prophet model"
         
+        # Logistic growth needs a cap and floor
+        # We set the floor to 0 to prevent negative predictions
+        # We set the cap to 2x the maximum historical price (or at least a very high value)
+        max_price = df_prophet['y'].max()
+        df_prophet['cap'] = max_price * 10 
+        df_prophet['floor'] = 0
+        
         model = Prophet(
+            growth='logistic',
             yearly_seasonality=True,
             weekly_seasonality=True,
             daily_seasonality=False,
@@ -262,8 +400,11 @@ def create_prophet_forecast(data, periods):
         model.fit(df_prophet)
         
         future = model.make_future_dataframe(periods=periods)
-        forecast = model.predict(future)
+        future['cap'] = max_price * 10
+        future['floor'] = 0
         
+        forecast = model.predict(future)
+            
         return forecast, model, None
     except Exception as e:
         return None, None, f"Error in Prophet model: {str(e)}"
@@ -603,7 +744,7 @@ def train_ml_models(X, y):
 # Main App
 def main():
     # Header
-    st.markdown('<h1 class="main-header">📈 StockSki - Advanced Stock Predictor</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📈 StockLens - Advanced Stock Predictor</h1>', unsafe_allow_html=True)
     st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Powered by AI & Machine Learning</p>', unsafe_allow_html=True)
     
     # Sidebar
@@ -659,7 +800,7 @@ def main():
 
     # Load data
     if st.sidebar.button("🚀 Load Data & Analyze", type="primary"):
-        with st.spinner("Loading stock data from Alpha Vantage..."):
+        with st.spinner("Loading stock data from multiple sources..."):
             data, error = load_stock_data(selected_stock, start_date, end_date)
             if error:
                 st.error(f"❌ {error}")
@@ -834,7 +975,8 @@ def main():
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             if len(forecast) > st.session_state.prediction_days:
-                                next_day_pred = forecast['yhat'].iloc[-st.session_state.prediction_days-1]
+                                # The first prediction day is at index len(prophet_data)
+                                next_day_pred = forecast['yhat'].iloc[len(prophet_data)]
                                 st.metric("Next Day Prediction", f"${next_day_pred:.2f}")
                             else:
                                 st.metric("Next Day Prediction", "N/A")
@@ -1133,7 +1275,7 @@ def main():
         # Welcome screen
         st.markdown("""
         <div class="info-box">
-            <h3>🚀 Welcome to StockSki!</h3>
+            <h3>🚀 Welcome to StockLens!</h3>
             <p>This advanced stock prediction app uses multiple AI models and technical analysis to help you make informed investment decisions.</p>
         </div>
         """, unsafe_allow_html=True)
